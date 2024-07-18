@@ -1,20 +1,35 @@
+import pickle
+
 import torch
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 class CTCLabelConverter(object):
-    """ Convert between text-label and text-index """
+    """Convert between text-label and text-index"""
 
-    def __init__(self, character):
-        # character (str): set of the possible characters.
+    def __init__(self, character, separator_list={}, dict_pathlist={}):
         dict_character = list(character)
 
         self.dict = {}
         for i, char in enumerate(dict_character):
-            # NOTE: 0 is reserved for 'CTCblank' token required by CTCLoss
             self.dict[char] = i + 1
 
-        self.character = ['[CTCblank]'] + dict_character  # dummy '[CTCblank]' token for CTCLoss (index 0)
+        self.character = ["[blank]"] + dict_character  # dummy '[blank]' token for CTCLoss (index 0)
+        self.separator_list = separator_list
+
+        separator_char = []
+        for lang, sep in separator_list.items():
+            separator_char += sep
+
+        self.ignore_idx = [0] + [i + 1 for i, item in enumerate(separator_char)]
+
+        dict_list = {}
+        for lang, dict_path in dict_pathlist.items():
+            with open(dict_path, "rb") as input_file:
+                word_count = pickle.load(input_file)
+            dict_list[lang] = word_count
+        self.dict_list = dict_list
 
     def encode(self, text, batch_max_length=25):
         """convert text-label into text-index.
@@ -26,6 +41,10 @@ class CTCLabelConverter(object):
             text: text index for CTCLoss. [batch_size, batch_max_length]
             length: length of each text. [batch_size]
         """
+        # length = [len(s) for s in text]
+        # text = ''.join(text)
+        # text = [self.dict[char] for char in text]
+        # return (torch.IntTensor(text), torch.IntTensor(length))
         length = [len(s) for s in text]
 
         # The index used for padding (=0) would not affect the CTC loss calculation.
@@ -33,27 +52,31 @@ class CTCLabelConverter(object):
         for i, t in enumerate(text):
             text = list(t)
             text = [self.dict[char] for char in text]
-            batch_text[i][:len(text)] = torch.LongTensor(text)
+            batch_text[i][: len(text)] = torch.LongTensor(text)
         return (batch_text.to(device), torch.IntTensor(length).to(device))
 
     def decode(self, text_index, length):
-        """ convert text-index into text-label. """
+        """convert text-index into text-label."""
         texts = []
-        for index, l in enumerate(length):
-            t = text_index[index, :]
+        index = 0
+        for l in length:
+            t = text_index[index : index + l]
 
             char_list = []
             for i in range(l):
-                if t[i] != 0 and (not (i > 0 and t[i - 1] == t[i])):  # removing repeated characters and blank.
+                if t[i] not in self.ignore_idx and (
+                    not (i > 0 and t[i - 1] == t[i])
+                ):  # removing repeated characters and blank (and separator).
                     char_list.append(self.character[t[i]])
-            text = ''.join(char_list)
+            text = "".join(char_list)
 
             texts.append(text)
+            index += l
         return texts
 
 
 class CTCLabelConverterForBaiduWarpctc(object):
-    """ Convert between text-label and text-index for baidu warpctc """
+    """Convert between text-label and text-index for baidu warpctc"""
 
     def __init__(self, character):
         # character (str): set of the possible characters.
@@ -64,7 +87,7 @@ class CTCLabelConverterForBaiduWarpctc(object):
             # NOTE: 0 is reserved for 'CTCblank' token required by CTCLoss
             self.dict[char] = i + 1
 
-        self.character = ['[CTCblank]'] + dict_character  # dummy '[CTCblank]' token for CTCLoss (index 0)
+        self.character = ["[CTCblank]"] + dict_character  # dummy '[CTCblank]' token for CTCLoss (index 0)
 
     def encode(self, text, batch_max_length=25):
         """convert text-label into text-index.
@@ -76,23 +99,23 @@ class CTCLabelConverterForBaiduWarpctc(object):
             length: length of each text. [batch_size]
         """
         length = [len(s) for s in text]
-        text = ''.join(text)
+        text = "".join(text)
         text = [self.dict[char] for char in text]
 
         return (torch.IntTensor(text), torch.IntTensor(length))
 
     def decode(self, text_index, length):
-        """ convert text-index into text-label. """
+        """convert text-index into text-label."""
         texts = []
         index = 0
         for l in length:
-            t = text_index[index:index + l]
+            t = text_index[index : index + l]
 
             char_list = []
             for i in range(l):
                 if t[i] != 0 and (not (i > 0 and t[i - 1] == t[i])):  # removing repeated characters and blank.
                     char_list.append(self.character[t[i]])
-            text = ''.join(char_list)
+            text = "".join(char_list)
 
             texts.append(text)
             index += l
@@ -100,12 +123,12 @@ class CTCLabelConverterForBaiduWarpctc(object):
 
 
 class AttnLabelConverter(object):
-    """ Convert between text-label and text-index """
+    """Convert between text-label and text-index"""
 
     def __init__(self, character):
         # character (str): set of the possible characters.
         # [GO] for the start token of the attention decoder. [s] for end-of-sentence token.
-        list_token = ['[GO]', '[s]']  # ['[s]','[UNK]','[PAD]','[GO]']
+        list_token = ["[GO]", "[s]"]  # ['[s]','[UNK]','[PAD]','[GO]']
         list_character = list(character)
         self.character = list_token + list_character
 
@@ -115,7 +138,7 @@ class AttnLabelConverter(object):
             self.dict[char] = i
 
     def encode(self, text, batch_max_length=25):
-        """ convert text-label into text-index.
+        """convert text-label into text-index.
         input:
             text: text labels of each image. [batch_size]
             batch_max_length: max length of text label in the batch. 25 by default
@@ -132,16 +155,16 @@ class AttnLabelConverter(object):
         batch_text = torch.LongTensor(len(text), batch_max_length + 1).fill_(0)
         for i, t in enumerate(text):
             text = list(t)
-            text.append('[s]')
+            text.append("[s]")
             text = [self.dict[char] for char in text]
-            batch_text[i][1:1 + len(text)] = torch.LongTensor(text)  # batch_text[:, 0] = [GO] token
+            batch_text[i][1 : 1 + len(text)] = torch.LongTensor(text)  # batch_text[:, 0] = [GO] token
         return (batch_text.to(device), torch.IntTensor(length).to(device))
 
     def decode(self, text_index, length):
-        """ convert text-index into text-label. """
+        """convert text-index into text-label."""
         texts = []
         for index, l in enumerate(length):
-            text = ''.join([self.character[i] for i in text_index[index, :]])
+            text = "".join([self.character[i] for i in text_index[index, :]])
             texts.append(text)
         return texts
 
